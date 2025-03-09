@@ -1,1 +1,2 @@
-data/
+data/tatoeba*
+*/__pycache__/
