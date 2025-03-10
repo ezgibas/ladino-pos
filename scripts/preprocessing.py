@@ -27,13 +27,8 @@ def fastalign_prep(dataset1, dataset2):
     return parallel_data
 
 
-def main():
+def preprocess(ladino_file_path, spanish_file_path, parallel_file_path, spanish_pos_file_path):
     # file paths
-    global ladino_file_path, spanish_file_path, ladino_tokenized, spanish_tokenized, spanish_pos, parallel_file_path
-
-    ladino_file_path = '../data/tatoeba.spa-lad.lad'
-    spanish_file_path = '../data/tatoeba.spa-lad.spa'
-    parallel_file_path = '../data/parallel_spa-lad.txt'
 
     # load data
     with open(ladino_file_path, "r", encoding="utf-8") as file:
@@ -43,8 +38,12 @@ def main():
         spanish_data = file.read().splitlines()
 
     # create arrays of tokens
-    ladino_tokenized = [tokenize(sentence)[0] for sentence in ladino_data]
-    spanish_tokenized, spanish_pos = zip(*[tokenize(sentence, give_pos=True) for sentence in spanish_data])
+    if debug:
+        ladino_tokenized = [tokenize(sentence)[0] for sentence in ladino_data[:5]]
+        spanish_tokenized, spanish_pos = zip(*[tokenize(sentence, give_pos=True) for sentence in spanish_data[:5]])
+    else:
+        ladino_tokenized = [tokenize(sentence)[0] for sentence in ladino_data]
+        spanish_tokenized, spanish_pos = zip(*[tokenize(sentence, give_pos=True) for sentence in spanish_data])
     spanish_tokenized = list(spanish_tokenized)
     spanish_pos = list(spanish_pos)
 
@@ -58,7 +57,15 @@ def main():
     # save result as a file to be passed into fastalign
     with open(parallel_file_path, "w", encoding="utf-8") as f:
         for line in parallel_data:
+            if debug:
+                print(line)
             f.write(line + "\n")
-    f.close()
 
-main()
+    # also save spanish POS tags
+    with open(spanish_pos_file_path, "w", encoding="utf-8") as f:
+        for tags in spanish_pos:
+            if debug:
+                print(tags)
+            f.write(str(tags) + "\n")
+
+    f.close()

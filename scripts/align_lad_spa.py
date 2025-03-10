@@ -1,1 +1,0 @@
-# align Spanish and Ladino words using FastAlign 
