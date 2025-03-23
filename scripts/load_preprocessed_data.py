@@ -21,6 +21,10 @@ class Token:
     
     def correct_pos(self, pos):
         self.pos = pos
+
+    # format to fit NLTK input type
+    def format(self):
+        return (self.word, self.pos)
     
     def __str__(self):
         return self.word + " (" + self.pos + ")"
