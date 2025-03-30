@@ -2,7 +2,6 @@ import numpy as np
 from collections import defaultdict
 import re
 
-# TODO how do i even incorporate this
 rules = [
     (r'.*(and'), # pronounso|endo)$', 'VERB'), # verbs in gerund
     (r'.*(ido|ado|ida|ada)$', 'VERB'), # verbs in continuous
@@ -16,15 +15,17 @@ rules = [
 ]
 
 class HMMTagger:
-    def __init__(self, num_tags, vocab_size, smoothing=1.0):
-        self.num_tags = num_tags  
-        self.vocab_size = vocab_size  
+    def __init__(self, tags, vocab, smoothing=1.0):
+        self.states = tags
+        self.vocab = vocab
+        self.num_tags = len(self.states)  
+        self.vocab_size = len(self.vocab)  
         self.smoothing = smoothing 
 
         # initialize these variables to 0. should be initialized using initialize_probabilities()
-        self.transition_probs = np.zeros(num_tags, num_tags)
-        self.emission_probs = np.zeros(num_tags, vocab_size)
-        self.initial_probs = np.zeros(num_tags)
+        self.transition_probs = np.zeros((self.num_tags, self.num_tags))
+        self.emission_probs = np.zeros((self.num_tags, self.vocab_size))
+        self.initial_probs = np.zeros(self.num_tags)
         
     def initialize_probabilities(self, transition, emission, initial):
         """initialize transition, emission, and initial probabilities"""
@@ -46,112 +47,165 @@ class HMMTagger:
         self.emission_probs /= self.emission_probs.sum(axis=1, keepdims=True)
 
     def train_em(self, sequences, num_iterations=10):
-        """Train HMM using EM for unsupervised learning."""
+        """Train HMM using EM algorithm"""
         for _ in range(num_iterations):
-            expected_transitions = np.zeros_like(self.transition_probs)
-            expected_emissions = np.zeros_like(self.emission_probs)
-            expected_initials = np.zeros_like(self.initial_probs)
+            # expected counts
+            expected_transitions = np.zeros((self.num_tags, self.num_tags))
+            expected_emissions = np.zeros((self.vocab_size, self.num_tags))
+            expected_initials = np.zeros(self.num_tags)
 
             for sequence in sequences:
-                alpha = self.forward(sequence)  # Forward probabilities
-                beta = self.backward(sequence)  # Backward probabilities
+                alpha = self.forward(sequence)  # forward probabilities
+                beta = self.backward(sequence)  # backward probabilities
                 xi, gamma = self.compute_expectations(sequence, alpha, beta)
 
                 expected_transitions += xi.sum(axis=0)
-                for t in range(len(sequence)):
-                    expected_emissions[:, sequence[t]] += gamma[t]
+                for t, word in enumerate(sequence):
+                    word_idx = self.vocab.index(word) if word in self.vocab else -1
+                    if word_idx != -1:
+                        expected_emissions[word_idx] += gamma[t]
 
                 expected_initials += gamma[0]
 
-            # Normalize to update parameters
+            # normalize to update parameters
             self.transition_probs = expected_transitions / expected_transitions.sum(axis=1, keepdims=True)
             self.emission_probs = expected_emissions / expected_emissions.sum(axis=1, keepdims=True)
             self.initial_probs = expected_initials / expected_initials.sum()
 
         self.apply_laplace_smoothing()
 
+
     def forward(self, sequence):
-        """Computer forward probabilities (alpha) for EM algorithm"""
-        T = len(sequence)
-        N = self.num_tags
-        alpha = np.zeros((T, N))
+        """Compute forward probabilities (alpha)"""
+        sent_length = len(sequence)
+        alpha = np.zeros((sent_length, self.num_tags))
 
-        # initialize
-        for i in range(N):
-            alpha[0, i] = self.initial_probs[i] * self.emission_probs[i, sequence[0]]
+        # initialization step
+        word_idx = self.vocab.index(sequence[0]) if sequence[0] in self.vocab else -1
+        if word_idx != -1:
+            alpha[0] = self.initial_probs * self.emission_probs[word_idx]
+        else:
+            alpha[0] = self.initial_probs * (1 / self.vocab_size)  #  for handling oov words
 
-        # recursion
+        # recusrsion
         for t in range(1, T):
-            for j in range(N):
-                alpha[t, j] = np.sum(alpha[t-1] * self.transition_probs[:, j]) * self.emission_probs[j, sequence[t]]
+            word_idx = self.vocab.index(sequence[t]) if sequence[t] in self.vocab else -1
+            if word_idx != -1:
+                emission = self.emission_probs[word_idx]
+            else:
+                emission = 1 / self.vocab_size  # for handling oov
+
+            alpha[t] = (alpha[t-1] @ self.transition_probs) * emission
 
         return alpha
 
-
     def backward(self, sequence):
-        """Compute backward probabilities (beta) for EM algorithm"""
-        T = len(sequence)
-        N = len(self.states)
-        beta = np.zeros((T, N))
+        """Compute backward probabilities (beta)"""
+        sent_length = len(sequence)
+        beta = np.zeros((sent_length, self.num_tags))
 
         # initialize
-        beta[T-1] = 1  
+        beta[-1] = 1  
 
         # recursion
-        for t in range(T-2, -1, -1):
-            for i in range(N):
-                beta[t, i] = np.sum(self.transition_probs[i] * self.emission_probs[:, sequence[t+1]] * beta[t+1])
+        for t in range(T - 2, -1, -1):
+            word_idx = self.vocab.index(sequence[t+1]) if sequence[t+1] in self.vocab else -1
+            if word_idx != -1:
+                emission = self.emission_probs[word_idx]
+            else:
+                emission = 1 / self.vocab_size  # handle oov
+
+            beta[t] = self.transition_probs @ (beta[t+1] * emission)
 
         return beta
 
     def compute_expectations(self, sequence, alpha, beta):
-        """Compute expectations using forward and backward probabilities."""
-        T = len(sequence)
-        N = len(self.states)
+        """
+        Compute the expected counts of transitions (xi) and states (gamma)
+        for a given sequence using Forward-Backward probabilities.
+        """
 
-        xi = np.zeros((T-1, N, N))  # Expected transition counts
-        gamma = np.zeros((T, N))    # Expected state probabilities
+        sent_length = len(sequence)  # lengh
+        num_tags = self.num_tags 
 
-        for t in range(T-1):
-            denominator = np.sum(alpha[t] * self.transition_probs * self.emission_probs[:, sequence[t+1]] * beta[t+1])
-            for i in range(N):
-                for j in range(N):
-                    xi[t, i, j] = (alpha[t, i] * self.transition_probs[i, j] * 
-                                self.emission_probs[j, sequence[t+1]] * beta[t+1, j]) / denominator
-            gamma[t] = np.sum(xi[t], axis=1)
+        xi = np.zeros((sent_length - 1, num_tags, num_tags))  # transition expectations
+        gamma = np.zeros((sent_length, num_tags))  # state expectations
 
-        gamma[T-1] = alpha[T-1] / np.sum(alpha[T-1])  # Last state
+        # probability of whole sequence
+        prob_sequence = np.sum(alpha[-1]) 
+
+        # gamma
+        for t in range(sent_length):
+            gamma[t] = (alpha[t] * beta[t]) / prob_sequence  # normlaize
+
+
+        # xi
+        for t in range(sent_length - 1):
+            word_index = self.vocab.index(sequence[t + 1]) if sequence[t + 1] in self.vocab else -1
+            for i in range(num_tags):
+                for j in range(num_tags):
+                    # add smoothing for unseen words
+                    # TODO use rules 
+                    emission_prob = (self.emission_probs[word_index, j] 
+                                     if word_index != -1 
+                                     else self.smoothing / (self.vocab_size + self.smoothing))
+                    xi[t, i, j] = (
+                        alpha[t, i] 
+                        * self.transition_probs[i, j] 
+                        * emission_prob  
+                        * beta[t + 1, j]
+                    )
+
+            # normalize xi
+            xi[t] /= np.sum(xi[t])
 
         return xi, gamma
 
     
     def viterbi(self, sequence):
-        """Tag a given sequence using viterbi"""
-        T = len(sequence)
-        V = np.zeros((T, self.num_tags))  # Viterbi table
-        backpointers = np.zeros((T, self.num_tags), dtype=int)
+        """Predict best set of tags for a given sentence"""
+        sent_length = len(sequence)  
+        N = self.num_tags
 
-        # initialization
-        V[0] = np.log(self.initial_probs) + np.log(self.emission_probs[:, sequence[0]])
+        V = np.zeros((sent_length, N))
+        B = np.zeros((sent_length, N), dtype=int)
+
+        # initialize
+        for i in range(N):
+            word = sequence[0]
+            emission_prob = (self.emission_probs[i, word] if word in self.vocab else 1e-5)
+            V[0, i] = self.initial_probs[i] * emission_prob
+            B[0, i] = 0
 
         # recursion
-        for t in range(1, T):
-            for s in range(self.num_tags):
-                prob = V[t-1] + np.log(self.transition_probs[:, s]) + np.log(self.emission_probs[s, sequence[t]])
-                V[t, s] = np.max(prob)
-                backpointers[t, s] = np.argmax(prob)
+        for t in range(1, sent_length):
+            for j in range(N):
+                word = sequence[t]
+                emission_prob = (
+                    self.emission_probs[j, word]
+                    if word in self.vocab
+                    else 1e-4 # Small probability for OOV
+                )
+                probabilities = V[t-1] * self.transition_probs[:, j] * emission_prob
+                V[t, j] = np.max(probabilities)
+                B[t, j] = np.argmax(probabilities)
 
-        # backtrack
-        best_path = [np.argmax(V[-1])]
-        for t in range(T-1, 0, -1):
-            best_path.insert(0, backpointers[t, best_path[0]])
+        # backtracking + termination
+        best_path = np.zeros(sent_length, dtype=int)
+        best_path[-1] = np.argmax(V[-1])
 
-        return best_path
-    
+        for t in range(sent_length-2, -1, -1):
+            best_path[t] = B[t+1, best_path[t+1]]
 
-    # TODO how do i even incorporate this
-    def handle_oov(word):
-        """ Assign a POS tag to an OOV word based on regex rules. """
+        best_state_sequence = [
+            self.states[i] if sequence[t] in self.vocab else self.handle_oov(sequence[t])
+            for t, i in enumerate(best_path)
+        ]
+        
+        return best_state_sequence
+
+    def handle_oov(self, word):
+        """ Assign a POS tag to an OOV word based on regex rules"""
         for pattern, tag in rules:
             if re.fullmatch(pattern, word):  # check if word matches regex pattern
                 return tag
