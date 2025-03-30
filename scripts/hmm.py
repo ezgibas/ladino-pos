@@ -3,12 +3,13 @@ from collections import defaultdict
 import re
 
 rules = [
-    (r'.*(and'), # pronounso|endo)$', 'VERB'), # verbs in gerund
+    (r'.*(ando|endo)$', 'VERB'), # verbs in gerund
     (r'.*(ido|ado|ida|ada)$', 'VERB'), # verbs in continuous
     (r'.*(er|ir|ar)$', 'VERB'), # verbs in infinitive
     (r'.*(erse|irse|arse)$', 'VERB'), # verbs in infinitive reflexive
     (r'.*mente$', 'ADV'), # -mente suffix is for adverbs 
     (r'^-?[0-9]+(.[0-9]+)?\.*$', 'NUM'), # numbers
+    (r'(un|uno|una)$', 'DET'), # determiners
     (r'(el|El|eya|Eya|Yo|yo)$', 'PRON'), # pronouns
     (r'[!\"#\$%&\'\(\)\*\+,\-.\/:;<=>\?@\[\\\]\^_`{\|}~]', 'PUNCT'), # punctuation   
     (r'\b[A-Z].*?\b', 'PROPN') # proper nouns (capitalized)  
@@ -24,7 +25,7 @@ class HMMTagger:
 
         # initialize these variables to 0. should be initialized using initialize_probabilities()
         self.transition_probs = np.zeros((self.num_tags, self.num_tags))
-        self.emission_probs = np.zeros((self.num_tags, self.vocab_size))
+        self.emission_probs = np.zeros((self.vocab_size, self.num_tags))
         self.initial_probs = np.zeros(self.num_tags)
         
     def initialize_probabilities(self, transition, emission, initial):
@@ -88,7 +89,7 @@ class HMMTagger:
             alpha[0] = self.initial_probs * (1 / self.vocab_size)  #  for handling oov words
 
         # recusrsion
-        for t in range(1, T):
+        for t in range(1, sent_length):
             word_idx = self.vocab.index(sequence[t]) if sequence[t] in self.vocab else -1
             if word_idx != -1:
                 emission = self.emission_probs[word_idx]
@@ -108,7 +109,7 @@ class HMMTagger:
         beta[-1] = 1  
 
         # recursion
-        for t in range(T - 2, -1, -1):
+        for t in range(sent_length - 2, -1, -1):
             word_idx = self.vocab.index(sequence[t+1]) if sequence[t+1] in self.vocab else -1
             if word_idx != -1:
                 emission = self.emission_probs[word_idx]
@@ -173,7 +174,7 @@ class HMMTagger:
         # initialize
         for i in range(N):
             word = sequence[0]
-            emission_prob = (self.emission_probs[i, word] if word in self.vocab else 1e-5)
+            emission_prob = self.emission_probs[self.vocab.index(word), i] if word in self.vocab else 1e-4
             V[0, i] = self.initial_probs[i] * emission_prob
             B[0, i] = 0
 
@@ -182,7 +183,7 @@ class HMMTagger:
             for j in range(N):
                 word = sequence[t]
                 emission_prob = (
-                    self.emission_probs[j, word]
+                    self.emission_probs[self.vocab.index(word), j]
                     if word in self.vocab
                     else 1e-4 # Small probability for OOV
                 )
