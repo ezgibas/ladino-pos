@@ -14,7 +14,6 @@ rules = [
     (r'(un|uno|una)$', 'DET'), # determiners
     (r'(el|El|eya|Eya|Yo|yo)$', 'PRON'), # pronouns
     (r'[!\"#\$%&\'\(\)\*\+,\-.\/:;<=>\?@\[\\\]\^_`{\|}~]', 'PUNCT'), # punctuation   
-    (r'\b[A-Z].*?\b', 'PROPN') # proper nouns (capitalized)  
 ]
 
 class HMMTagger:
@@ -30,24 +29,22 @@ class HMMTagger:
         self.emission_probs = np.zeros((self.vocab_size, self.num_tags))
         self.initial_probs = np.zeros(self.num_tags)
 
-    def load_hmm(filename="results/hmm_tagger.pkl"):
+    def load_hmm(filename="../results/hmm_tagger.pkl"):
         """Load HMM from a file"""
         with open(filename, "rb") as f:
             data = pickle.load(f)
             
         hmm = HMMTagger(
-            num_tags=len(data["states"]),
-            vocab_size=len(data["vocab"]),
-            smoothing=1,  # Keep same smoothing as before
+            tags=data["states"],
             vocab=data["vocab"],
-            transition_probs=data["transition_probs"],
-            emission_probs=data["emission_probs"],
-            initial_probs=data["initial_probs"]
         )
-        hmm.states = data["states"]  # Restore states (POS tags)
+        hmm.initialize_probabilities(            
+            transition=data["transition_probs"],
+            emission=data["emission_probs"],
+            initial=data["initial_probs"])
         return hmm
     
-    def save_hmm(hmm, filename="results/hmm_tagger.pkl"):
+    def save_hmm(hmm, filename="../results/hmm_tagger.pkl"):
         """Save HMM to a file"""
         with open(filename, "wb") as f:
             pickle.dump({
@@ -182,7 +179,6 @@ class HMMTagger:
             for i in range(num_tags):
                 for j in range(num_tags):
                     # add smoothing for unseen words
-                    # TODO use rules 
                     emission_prob = (self.emission_probs[word_index, j] 
                                      if word_index != -1 
                                      else self.smoothing / (self.vocab_size + self.smoothing))
@@ -234,16 +230,31 @@ class HMMTagger:
         for t in range(sent_length-2, -1, -1):
             best_path[t] = B[t+1, best_path[t+1]]
 
-        best_state_sequence = [
-            self.states[i] if sequence[t] in self.vocab else self.handle_oov(sequence[t])
-            for t, i in enumerate(best_path)
-        ]
+        best_state_sequence = []
+        prev_tag = None
+        for word_idx, i in enumerate(best_path):
+            tag = ""
+            if sequence[word_idx] in self.vocab:
+                tag = self.states[i]
+            else:
+                tag = self.handle_oov(sequence[word_idx], prev_tag)
+
+            prev_tag = tag
+            best_state_sequence.append(tag)
         
         return best_state_sequence
 
-    def handle_oov(self, word):
+    def handle_oov(self, word, prev_tag):
         """ Assign a POS tag to an OOV word based on regex rules"""
         for pattern, tag in rules:
             if re.fullmatch(pattern, word):  # check if word matches regex pattern
                 return tag
-        return "NOUN"  # Default fallback if no rule matches
+            # instead of default fallback rule, maximize transition probability
+            elif prev_tag is not None:
+                prev_tag_idx = self.states.index(prev_tag)
+                tag_idx =  np.argmax(self.transition_probs[prev_tag_idx])
+                return self.states[tag_idx]
+            # select tag that is most likely to start a sentence
+            else:
+                tag_idx = np.argmax(self.initial_probs)
+                return self.states[tag_idx]
