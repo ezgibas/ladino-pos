@@ -1,6 +1,8 @@
 import numpy as np
 from collections import defaultdict
 import re
+import pickle
+
 
 rules = [
     (r'.*(ando|endo)$', 'VERB'), # verbs in gerund
@@ -27,6 +29,34 @@ class HMMTagger:
         self.transition_probs = np.zeros((self.num_tags, self.num_tags))
         self.emission_probs = np.zeros((self.vocab_size, self.num_tags))
         self.initial_probs = np.zeros(self.num_tags)
+
+    def load_hmm(filename="results/hmm_tagger.pkl"):
+        """Load HMM from a file"""
+        with open(filename, "rb") as f:
+            data = pickle.load(f)
+            
+        hmm = HMMTagger(
+            num_tags=len(data["states"]),
+            vocab_size=len(data["vocab"]),
+            smoothing=1,  # Keep same smoothing as before
+            vocab=data["vocab"],
+            transition_probs=data["transition_probs"],
+            emission_probs=data["emission_probs"],
+            initial_probs=data["initial_probs"]
+        )
+        hmm.states = data["states"]  # Restore states (POS tags)
+        return hmm
+    
+    def save_hmm(hmm, filename="results/hmm_tagger.pkl"):
+        """Save HMM to a file"""
+        with open(filename, "wb") as f:
+            pickle.dump({
+                "transition_probs": hmm.transition_probs,
+                "emission_probs": hmm.emission_probs,
+                "initial_probs": hmm.initial_probs,
+                "vocab": hmm.vocab,
+                "states": hmm.states
+            }, f)
         
     def initialize_probabilities(self, transition, emission, initial):
         """initialize transition, emission, and initial probabilities"""
@@ -41,11 +71,13 @@ class HMMTagger:
 
     def apply_laplace_smoothing(self):
         """apply Laplace smoothing to handle OOV words better"""
+        epsilon = 1e-8 # add a small constant to normalization to prevent division by zero
+
         self.transition_probs += self.smoothing
-        self.transition_probs /= self.transition_probs.sum(axis=1, keepdims=True)
+        self.transition_probs /= (self.transition_probs.sum(axis=1, keepdims=True) + epsilon)
         
         self.emission_probs += self.smoothing
-        self.emission_probs /= self.emission_probs.sum(axis=1, keepdims=True)
+        self.emission_probs /= (self.emission_probs.sum(axis=1, keepdims=True) + epsilon)
 
     def train_em(self, sequences, num_iterations=10):
         """Train HMM using EM algorithm"""
@@ -68,10 +100,12 @@ class HMMTagger:
 
                 expected_initials += gamma[0]
 
+            epsilon = 1e-8 # add a small constant to normalization to prevent division by zero
+
             # normalize to update parameters
-            self.transition_probs = expected_transitions / expected_transitions.sum(axis=1, keepdims=True)
-            self.emission_probs = expected_emissions / expected_emissions.sum(axis=1, keepdims=True)
-            self.initial_probs = expected_initials / expected_initials.sum()
+            self.transition_probs = expected_transitions / (expected_transitions.sum(axis=1, keepdims=True) + epsilon)
+            self.emission_probs = expected_emissions / (expected_emissions.sum(axis=1, keepdims=True) + epsilon)
+            self.initial_probs = expected_initials / (expected_initials.sum() + epsilon)
 
         self.apply_laplace_smoothing()
 
@@ -135,9 +169,11 @@ class HMMTagger:
         # probability of whole sequence
         prob_sequence = np.sum(alpha[-1]) 
 
+        epsilon = 1e-8 # add a small constant to normalization to prevent division by zero
+
         # gamma
         for t in range(sent_length):
-            gamma[t] = (alpha[t] * beta[t]) / prob_sequence  # normlaize
+            gamma[t] = (alpha[t] * beta[t]) / (prob_sequence + epsilon) # normlaize
 
 
         # xi
@@ -158,7 +194,7 @@ class HMMTagger:
                     )
 
             # normalize xi
-            xi[t] /= np.sum(xi[t])
+            xi[t] /= (np.sum(xi[t]) + epsilon)
 
         return xi, gamma
 
@@ -211,8 +247,3 @@ class HMMTagger:
             if re.fullmatch(pattern, word):  # check if word matches regex pattern
                 return tag
         return "NOUN"  # Default fallback if no rule matches
-
-
-
-
-
