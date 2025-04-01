@@ -7,6 +7,8 @@ and the outputs are preserved across sessions
 import ast
 import re
 from collections import Counter, defaultdict
+from string import punctuation
+
 
 class Token:
     def __init__(self, word, pos):
@@ -69,9 +71,21 @@ def load_ladino_pos(file_path):
             matches = re.findall(r"(\S+)\s*\((\S+)\)", line.strip())
 
             for word, tag in matches:
+                word = word.lower()
                 sentence.append(Token(word, tag))
                 if tag != "UNK":  # don't store UNK tag in the dictionary
                     word_tags[word][tag] += 1  # count occurrences of each tag
         
             ladino_pos_sentences.append(sentence)  
     return ladino_pos_sentences, word_tags
+
+
+
+def strip_punctuation(word):
+    # if it's JUST punctuation, return it
+    if re.match(r'[!\"#\$%&\'\(\)\*\+,\-.\/:;<=>\?@\[\\\]\^_`{\|}~]', word):
+        return word
+    # if it's string with punctuation, strip it of its punctuation
+    else:
+        word.strip(punctuation)
+        return word
