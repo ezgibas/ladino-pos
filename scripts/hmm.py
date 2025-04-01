@@ -28,6 +28,10 @@ class HMMTagger:
         self.emission_probs = np.zeros((self.num_tags, self.vocab_size))
         self.initial_probs = np.zeros(self.num_tags)
 
+        # initialize hyperparameters
+        self.learning_rate = 0.1
+        self.decay_rate = 0.9
+
     def load_hmm(filename="../results/hmm_tagger.pkl"):
         """Load HMM from a file"""
         with open(filename, "rb") as f:
@@ -62,12 +66,20 @@ class HMMTagger:
         self.emission_probs = np.array(emission)
         self.initial_probs = np.array(initial)
 
+    def initialize_hyperparameters(self, learning_rate=0.1, decay_rate=0.9):
+        self.learning_rate = learning_rate
+        self.decay_rate = decay_rate
+
+
 
     def train_em(self, sequences, smoothing=1e-3, iterations=10):
+        learning_rate = self.learning_rate
+        decay_rate = self.decay_rate
         """Train the HMM using the Expectation-Maximization algorithm."""
         # compute expectations over all training sequences
         # one loop = one forward-backward pass
         for iteration in range(iterations):
+            print("iteration: " + str(iteration))
             # initialize expectations
             expected_transitions = np.zeros((self.num_tags, self.num_tags)) 
             expected_emissions = np.zeros((self.num_tags, self.vocab_size))
@@ -77,6 +89,15 @@ class HMMTagger:
                 # forward and backward probabilities
                 alpha = self.forward(sequence)
                 beta = self.backward(sequence)
+
+                log_prob_sequence = -np.inf
+
+                for t in range(len(sequence)):
+                    # Compute log sum of forward and backward probabilities
+                    prob =  np.logaddexp.reduce(alpha[t] + beta[t])
+                    log_prob_sequence = np.logaddexp(log_prob_sequence, prob)
+
+                print("Log probability: " + str(log_prob_sequence))
 
                 xis = [] # xi (hidden transitions)
                 gammas = [] # gamma (posterior probabilities for states)
@@ -106,7 +127,7 @@ class HMMTagger:
 
                 # emissions
                 for i in range(self.num_tags):
-                    emissions_denom = logsumexp(gammas[:, i])  
+                    emissions_denom = np.logaddexp.reduce(gammas[:, i])  
                     emissions_denom = np.logaddexp(emissions_denom, smoothing) # smoothing
 
                     # Loop over unique words in the sequence
@@ -115,7 +136,7 @@ class HMMTagger:
                         mask = sequence == k  # mask for words matching k
                         k_idx = self.vocab.index(k)
                         if np.any(mask):  # if word in sequence
-                            emissions_num = logsumexp(gammas[:, i][mask])  
+                            emissions_num = np.logaddexp.reduce(gammas[:, i][mask])  
                         else:
                             emissions_num = np.log(1e-6)  
 
@@ -124,42 +145,58 @@ class HMMTagger:
                         # normalize
                         expected_emissions[i, k_idx] = emissions_num - emissions_denom
 
-            # exponentiate to normalize ughhhh
+            # UPDATE 
+            # exponentiate 
+            self.transition_probs = np.exp(self.transition_probs)
+            self.initial_probs = np.exp(self.initial_probs)
+            self.emission_probs = np.exp(self.emission_probs)
+
             expected_emissions = np.exp(expected_emissions)
             expected_initials = np.exp(expected_initials)
             expected_transitions = np.exp(expected_transitions)
 
-            # normalize and update  (because it's not normalized when it gets here for some reason)
-            self.transition_probs = np.log(expected_transitions / expected_transitions.sum(axis = 1, keepdims=True))
-            self.initial_probs = np.log(expected_initials / expected_initials.sum())
-            self.emission_probs = np.log(expected_emissions / expected_emissions.sum(axis = 1, keepdims=True))
+            # learn
+            self.transition_probs = (1 - learning_rate) * self.transition_probs + learning_rate * expected_transitions
+            self.initial_probs = (1 - learning_rate) * self.initial_probs + learning_rate * expected_initials
+            self.emission_probs = (1 - learning_rate) * self.emission_probs + learning_rate * expected_emissions
+
+            # normalize
+            self.transition_probs = np.log(self.transition_probs / self.transition_probs.sum(axis = 1, keepdims=True))
+            self.initial_probs = np.log(self.initial_probs / self.initial_probs.sum())
+            self.emission_probs = np.log(self.emission_probs / self.emission_probs.sum(axis = 1, keepdims=True))
+
+            # decay learning rate
+            learning_rate = learning_rate * decay_rate
 
     def forward(self, sequence):
         """Compute forward probabilities (alpha)"""
         sent_length = len(sequence)
-        log_alpha = np.full((sent_length, self.num_tags), -np.inf)
+        alpha = np.full((sent_length, self.num_tags), -np.inf)
 
         # initialization step
         first_word = sequence[0]
         word_idx = self.vocab.index(first_word) if first_word in self.vocab else -1
 
         if word_idx >= 0: # if word is in vocabulary
-            log_alpha[0, :] = self.initial_probs + self.emission_probs[:, word_idx]
+            alpha[0, :] = self.initial_probs + self.emission_probs[:, word_idx]
         else:
-            log_alpha[0, :] = self.initial_probs + np.log(1e-6)
+            alpha[0, :] = self.initial_probs + np.log(1e-6)
+
 
         # Recursion step
         for t in range(1, sent_length):
             word = sequence[t]
             word_idx = self.vocab.index(word) if word in self.vocab else -1
             for j in range(self.num_tags):
-                log_alpha[t, j] = logsumexp(log_alpha[t-1] + self.transition_probs[:, j])
+                alpha_sum = alpha[t-1] + self.transition_probs[:, j]
                 if word_idx >= 0: # if word is in vocabulary
-                    log_alpha[t, j] += self.emission_probs[j, word_idx]
+                    alpha_sum = self.emission_probs[j, word_idx]
                 else:
-                    log_alpha[t, j] += np.log(1e-6)
-        return log_alpha
+                    alpha_sum += np.log(1e-6)
 
+                alpha[t, j] = np.logaddexp.reduce(alpha_sum)
+        return alpha
+    
     def backward(self, sequence):
         """Compute backward probabilities (beta)"""
         sent_length = len(sequence)
@@ -182,7 +219,7 @@ class HMMTagger:
                 else:
                     beta_sum += np.log(1e-6)
                     
-                beta[t, i] = logsumexp(beta_sum)
+                beta[t, i] = np.logaddexp.reduce(beta_sum)
 
         return beta
 
@@ -208,7 +245,7 @@ class HMMTagger:
                 xi[i, j] = s
 
         # normalization factor
-        denom = logsumexp(sum_sequence)
+        denom = np.logaddexp.reduce(sum_sequence)
 
         # normalize
         xi -= denom
@@ -218,12 +255,13 @@ class HMMTagger:
     def gamma(self, t, sequence, alpha, beta, xi_vals):
         """Compute gamma values, posterior probability P(X_i = tag | words so far)"""
         if t < len(sequence) - 1:
-            gamma = logsumexp(xi_vals[t], axis=1) 
+            gamma = np.logaddexp.reduce(xi_vals[t], axis=1) 
         else:
             gamma = alpha[t] + beta[t]
-            gamma -= logsumexp(gamma)  # normalize
+            gamma -= np.logaddexp.reduce(gamma)  # normalize
 
         return gamma
+
 
 
     def viterbi(self, sequence):
@@ -264,7 +302,6 @@ class HMMTagger:
 
         best_state_sequence = []
         prev_tag = None
-        # print(best_path)
         for word_idx, i in enumerate(best_path):
             tag = ""
             if sequence[word_idx] in self.vocab:
@@ -280,7 +317,6 @@ class HMMTagger:
 
     def handle_oov(self, word, prev_tag):
         """ Assign a POS tag to an OOV word based on regex rules"""
-        print(word)
         # for pattern, tag in rules:
             # if re.fullmatch(pattern, word):  # check if word matches regex pattern
             #     return tag
