@@ -17,12 +17,11 @@ rules = [
 ]
 
 class HMMTagger:
-    def __init__(self, tags, vocab, smoothing=1.0):
+    def __init__(self, tags, vocab):
         self.states = tags
         self.vocab = vocab
         self.num_tags = len(self.states)  
         self.vocab_size = len(self.vocab)  
-        self.smoothing = smoothing 
 
         # initialize these variables to 0. should be initialized using initialize_probabilities()
         self.transition_probs = np.zeros((self.num_tags, self.num_tags))
@@ -64,64 +63,78 @@ class HMMTagger:
         self.initial_probs = initial
 
 
-    def train_em(self, sequences, num_iterations=10):
+    def train_em(self, sequences, smoothing=1e-3):
         """Train the HMM using the Expectation-Maximization algorithm."""
+        # compute expectations over all training sequences
+        # one loop = one forward-backward pass
+        for sequence in sequences:
+            if len(sequence) == 1:
+                continue # TODO SCUFFED BANDAID FIX FOR SEQUENCES OF LENGTH 1 BUT WHATEVER
+            # initialize expectations
+            expected_transitions = self.transition_probs 
+            expected_emissions = self.emission_probs 
+            expected_initials = self.initial_probs
 
-        for iteration in range(num_iterations):
-            # initialize expectations to -inf (0 in log spave)
-            expected_transitions = np.zeros((self.num_tags, self.num_tags))  
-            expected_emissions = np.zeros((self.num_tags, self.vocab_size))  
-            expected_initials = np.zeros(self.num_tags)
+            sequence = np.array([strip_punctuation(word.lower()) for word in sequence])
+            # forward and backward probabilities
+            alpha = self.forward(sequence)
+            beta = self.backward(sequence)
 
-            # compute expectations over all training sequences
-            for sequence in sequences:
-                sequence = [strip_punctuation(word.lower()) for word in sequence]
-                # forward and backward probabilities
-                alpha = self.forward(sequence)
-                beta = self.backward(sequence)
-
-                xis = [] # xi (hidden transitions)
-                gammas = [] # gamma (posterior probabilities for states)
+            xis = [] # xi (hidden transitions)
+            gammas = [] # gamma (posterior probabilities for states)
 
             for t in range(len(sequence) - 1):
                 xis.append(self.xi(t, sequence, alpha, beta))
             for t in range(len(sequence)):
-                gamma = self.gamma(t, sequence, alpha, beta, xis) # TODO DELETE THIS IS FOR DEBUGGING
-                print(np.sum(np.exp(gamma), axis=1)) # TODO DELETE THIS IS FOR DEBUGGING
-                gammas.append(gamma)
-                # gammas.append(self.gamma(t, sequence, alpha, beta, xis))
+                gammas.append(self.gamma(t, sequence, alpha, beta, xis))
 
-            # accumulate expected counts
-            # counts for initial values
+            gammas =  np.array(gammas)
+
+            # CALCULATE EXPECTATIONS FOR MATRICES
+            # initial probabilities
             for i in range(self.num_tags):
-                expected_initials[i] += np.exp(gammas[0][i])  # first tag in sequence
+                expected_initials[i] = gammas[0][i]
 
-            # counts for transitions
-            for t in range(len(sequence) - 1):
-                for i in range(self.num_tags):
-                    for j in range(self.num_tags):
-                        expected_transitions[i, j] += np.exp(xis[t][i][j])  # log -> normal
+            # hidden - hidden transitions
+            transitions_num = np.logaddexp.reduce(xis, axis=0)
+            transitions_denom = np.logaddexp.reduce(gammas[:-1], axis=0)
 
-            # counts for emissions
-            for t in range(len(sequence)):
-                word = sequence[t]
-                word_index = self.vocab.index(word) if word in self.vocab else -1  # handle OOV words separately
-                for i in range(self.num_tags):
-                    if word_index >= 0: # if word is in vocabulary
-                        expected_emissions[i, word_index] += np.exp(gammas[t][i])  #  log -> normal
+            # apply Laplace smoothing early - otherwise values underflow
+            transitions_num = np.logaddexp(transitions_num, smoothing)  
+            transitions_denom = np.logaddexp(transitions_denom, smoothing) 
 
-        # apply laplace smoothing before normalizing
-        # expected_transitions += self.smoothing
-        # expected_initials += self.smoothing
-        # expected_emissions += self.smoothing
+            # normalize
+            expected_transitions = transitions_num - transitions_denom[: None]
 
-        print("EXPECTED EMISSIONS \n")
-        print(expected_emissions)
+            # emissions
+            emissions_denom = np.logaddexp.reduce(gammas, axis=0)
+            emissions_denom = np.logaddexp(emissions_denom, smoothing)
 
-        # Normalize
-        self.transition_probs = np.log(expected_transitions / expected_transitions.sum(axis=1, keepdims=True))
-        self.initial_probs = np.log(expected_initials / expected_initials.sum())
-        self.emission_probs = np.log(expected_emissions / expected_emissions.sum(axis=0, keepdims=True))  
+            unique_words = set(sequence)  # unique words in sequence
+            for i in range(self.num_tags):  
+                for k in unique_words:
+                    mask = sequence == k  # boolean mask
+                    k_idx = self.vocab.index(k)
+                    if np.any(mask):  # if word in sequence
+                        emissions_num = np.logaddexp.reduce(gammas[:, i][mask])  # sum gammas
+                    else:
+                        emissions_num  = np.log(1e-6) # small probability if never observed
+
+                    # smoothing
+                    emissions_num = np.logaddexp(emissions_num, smoothing)  
+
+                    # normalize
+                    expected_emissions[i, k_idx] = emissions_num - emissions_denom[i]
+
+            # exponentiate to normalize ughhhh
+            expected_emissions = np.exp(expected_emissions)
+            expected_initials = np.exp(expected_initials)
+            expected_transitions = np.exp(expected_transitions)
+            
+            # update 
+            self.transition_probs = np.log(expected_transitions / expected_transitions.sum(axis = 0))
+            self.initial_probs = np.log(expected_initials / expected_initials.sum())
+            self.emission_probs = np.log(expected_emissions / expected_emissions.sum(axis = 0))
 
 
     def forward(self, sequence):
@@ -256,15 +269,14 @@ class HMMTagger:
         prev_tag = None
         # print(best_path)
         for word_idx, i in enumerate(best_path):
-            # print(word_idx, i)
-            # tag = ""
-            # if sequence[word_idx] in self.vocab:
-            #     tag = self.states[i]
-            # else:
-            #     tag = self.handle_oov(sequence[word_idx], prev_tag)
+            tag = ""
+            if sequence[word_idx] in self.vocab:
+                tag = self.states[i]
+            else:
+                tag = self.handle_oov(sequence[word_idx], prev_tag)
 
-            # prev_tag = tag
             tag = self.states[i]
+            prev_tag = tag
             best_state_sequence.append(tag)
         
         return best_state_sequence
