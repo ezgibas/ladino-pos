@@ -90,14 +90,10 @@ class HMMTagger:
                 alpha = self.forward(sequence)
                 beta = self.backward(sequence)
 
-                log_prob_sequence = -np.inf
+                log_prob_sequence =  np.logaddexp.reduce(alpha[-1][:])
+                avg_log_prob = log_prob_sequence / len(sequence)
 
-                for t in range(len(sequence)):
-                    # Compute log sum of forward and backward probabilities
-                    prob =  np.logaddexp.reduce(alpha[t] + beta[t])
-                    log_prob_sequence = np.logaddexp(log_prob_sequence, prob)
-
-                print("Log probability: " + str(log_prob_sequence))
+                print("Log probability: " + str(avg_log_prob))
 
                 xis = [] # xi (hidden transitions)
                 gammas = [] # gamma (posterior probabilities for states)
@@ -107,7 +103,7 @@ class HMMTagger:
                 for t in range(len(sequence)):
                     gammas.append(self.gamma(t, sequence, alpha, beta, xis))
 
-                gammas =  np.array(gammas)
+                gammas = np.array(gammas)
 
                 # CALCULATE EXPECTATIONS FOR MATRICES
                 # initial probabilities
@@ -182,7 +178,6 @@ class HMMTagger:
         else:
             alpha[0, :] = self.initial_probs + np.log(1e-6)
 
-
         # Recursion step
         for t in range(1, sent_length):
             word = sequence[t]
@@ -190,7 +185,7 @@ class HMMTagger:
             for j in range(self.num_tags):
                 alpha_sum = alpha[t-1] + self.transition_probs[:, j]
                 if word_idx >= 0: # if word is in vocabulary
-                    alpha_sum = self.emission_probs[j, word_idx]
+                    alpha_sum += self.emission_probs[j, word_idx]
                 else:
                     alpha_sum += np.log(1e-6)
 
@@ -200,27 +195,32 @@ class HMMTagger:
     def backward(self, sequence):
         """Compute backward probabilities (beta)"""
         sent_length = len(sequence)
-        beta = np.zeros((sent_length, self.num_tags))
+        beta = np.full((sent_length, self.num_tags), -np.inf)
 
         # initialize
-        beta[sent_length-1, : ] = 0 #log(1) = 0
+        last_word = sequence[-1]
+        word_idx = self.vocab.index(last_word) if last_word in self.vocab else -1
+
+        if word_idx >= 0: # if word is in vocabulary
+            beta[-1, :] = self.initial_probs + self.emission_probs[:, word_idx]
+        else:
+            beta[-1, :] = self.initial_probs + np.log(1e-6)
 
         # recursion
         for t in range(sent_length - 2, -1, -1):
-            word = sequence[t + 1]  # emission (word) at t+1
+            word = sequence[t]  # emission (word) at t
             word_idx =  self.vocab.index(word) if word in self.vocab else -1
-            for i in range(self.num_tags):
-                # P(transition from i -> any) + beta(t + 1 -> any)
+            for j in range(self.num_tags):
+                # P(transition from j -> any) + beta(t + 1 -> any)
                 # note: multiplication is addition in log space
-                beta_sum = self.transition_probs[i, :] + beta[t + 1, :] 
+                beta_sum = self.transition_probs[j, :] + beta[t + 1] 
                 # add P(next evidence | any)
                 if word_idx >= 0: # if word is in vocabulary
-                   beta_sum += self.emission_probs[i, word_idx]
+                   beta_sum += self.emission_probs[j, word_idx]
                 else:
                     beta_sum += np.log(1e-6)
                     
-                beta[t, i] = np.logaddexp.reduce(beta_sum)
-
+                beta[t, j] = np.logaddexp.reduce(beta_sum)
         return beta
 
     def xi(self, t, sequence, alpha, beta):
@@ -240,9 +240,9 @@ class HMMTagger:
                 )
 
                 # sum of log probability
-                s = alpha[t, i] + self.transition_probs[i, j] + emission_prob + beta[t + 1, j]
-                sum_sequence.append(s)
-                xi[i, j] = s
+                xi_sum = alpha[t, i] + self.transition_probs[i, j] + emission_prob + beta[t + 1, j]
+                sum_sequence.append(xi_sum)
+                xi[i, j] = np.logaddexp.reduce(xi_sum)
 
         # normalization factor
         denom = np.logaddexp.reduce(sum_sequence)
@@ -254,11 +254,13 @@ class HMMTagger:
     
     def gamma(self, t, sequence, alpha, beta, xi_vals):
         """Compute gamma values, posterior probability P(X_i = tag | words so far)"""
-        if t < len(sequence) - 1:
+        if t >= len(sequence):
             gamma = np.logaddexp.reduce(xi_vals[t], axis=1) 
         else:
             gamma = alpha[t] + beta[t]
-            gamma -= np.logaddexp.reduce(gamma)  # normalize
+        
+        gamma_denom = np.logaddexp.reduce(alpha[t] + beta[t]) 
+        gamma -= gamma_denom
 
         return gamma
 
