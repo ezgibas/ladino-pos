@@ -23,10 +23,20 @@ class HMMTagger:
         self.num_tags = len(self.states)  
         self.vocab_size = len(self.vocab)  
 
-        # initialize these variables to 0. should be initialized using initialize_probabilities()
-        self.transition_probs = np.zeros((self.num_tags, self.num_tags))
-        self.emission_probs = np.zeros((self.num_tags, self.vocab_size))
-        self.initial_probs = np.zeros(self.num_tags)
+        # initialize uniform, can be initialized using initialize_probabilities() w/ other values
+        transition_probs = np.random.rand(self.num_tags, self.num_tags)
+        emission_probs = np.random.rand(self.num_tags, self.vocab_size)
+        initial_probs = np.random.rand(self.num_tags)
+
+        # normalize
+        transition_probs /= transition_probs.sum(axis=1, keepdims=True)  
+        emission_probs /= emission_probs.sum(axis=1, keepdims=True) 
+        initial_probs /= initial_probs.sum() 
+
+        # assign in log space
+        self.transition_probs = np.log(transition_probs)  
+        self.emission_probs = np.log(emission_probs) 
+        self.initial_probs = np.log(initial_probs) 
 
         # initialize hyperparameters
         self.learning_rate = 0.1
@@ -67,10 +77,9 @@ class HMMTagger:
         self.initial_probs = np.array(initial)
 
     def initialize_hyperparameters(self, learning_rate=0.1, decay_rate=0.9):
+        """Initialize learning rate and decay rate of the learning rate"""
         self.learning_rate = learning_rate
         self.decay_rate = decay_rate
-
-
 
     def train_em(self, sequences, smoothing=1e-3, iterations=10):
         learning_rate = self.learning_rate
@@ -93,7 +102,7 @@ class HMMTagger:
                 log_prob_sequence =  np.logaddexp.reduce(alpha[-1][:])
                 avg_log_prob = log_prob_sequence / len(sequence)
 
-                print("Log probability: " + str(avg_log_prob))
+                # print("Log probability: " + str(avg_log_prob))
 
                 xis = [] # xi (hidden transitions)
                 gammas = [] # gamma (posterior probabilities for states)
@@ -242,11 +251,10 @@ class HMMTagger:
                 # sum of log probability
                 xi_sum = alpha[t, i] + self.transition_probs[i, j] + emission_prob + beta[t + 1, j]
                 sum_sequence.append(xi_sum)
-                xi[i, j] = np.logaddexp.reduce(xi_sum)
+                xi[i, j] = xi_sum
 
         # normalization factor
         denom = np.logaddexp.reduce(sum_sequence)
-
         # normalize
         xi -= denom
 
@@ -264,58 +272,50 @@ class HMMTagger:
 
         return gamma
 
-
-
     def viterbi(self, sequence):
         """Predict best set of tags for a given sentence"""
         sequence = [strip_punctuation(word.lower()) for word in sequence]
         sent_length = len(sequence)  
         N = self.num_tags
 
-        V = np.zeros((sent_length, N))
+        V = np.full((sent_length, N), -np.inf)
         B = np.zeros((sent_length, N), dtype=int)
 
         # initialize
-        for i in range(N):
-            word = sequence[0]
-            emission_prob = self.emission_probs[i, self.vocab.index(word)] if word in self.vocab else 1e-4
-            V[0, i] = self.initial_probs[i] * emission_prob
-            B[0, i] = 0
+        first_word = sequence[0]
+        word_idx = self.vocab.index(first_word) if first_word in self.vocab else -1
+
+        if word_idx >= 0:  # Word in vocabulary
+            V[0, :] = self.initial_probs + self.emission_probs[:, word_idx]
+        else:
+            V[0, :] = self.initial_probs + np.log(1e-6) 
 
         # recursion
         for t in range(1, sent_length):
+            word = sequence[t]
+            word_idx = self.vocab.index(word) if word in self.vocab else -1
             for j in range(N):
-                word = sequence[t]
-                emission_prob = (
-                    self.emission_probs[j, self.vocab.index(word)]
-                    if word in self.vocab
-                    else 1e-4 # Small probability for OOV
-                )
-                probabilities = V[t-1] * self.transition_probs[:, j] * emission_prob
-                V[t, j] = np.max(probabilities)
-                B[t, j] = np.argmax(probabilities)
+                transition_vals = V[t-1] + self.transition_probs[:, j]
+                best_prev_state = np.argmax(transition_vals)
+                V[t, j] = transition_vals[best_prev_state]
 
-        # backtracking + termination
-        best_path = np.zeros(sent_length, dtype=int)
-        best_path[-1] = np.argmax(V[-1])
-
-        for t in range(sent_length-2, -1, -1):
-            best_path[t] = B[t+1, best_path[t+1]]
-
-        best_state_sequence = []
-        prev_tag = None
-        for word_idx, i in enumerate(best_path):
-            tag = ""
-            if sequence[word_idx] in self.vocab:
-                tag = self.states[i]
-            else:
-                tag = self.handle_oov(sequence[word_idx], prev_tag)
-
-            tag = self.states[i]
-            prev_tag = tag
-            best_state_sequence.append(tag)
+                if word_idx >= 0:
+                    V[t, j] += self.emission_probs[j, word_idx]
+                else:
+                    V[t, j] += np.log(1e-6)
+                
+                B[t, j] = best_prev_state
         
-        return best_state_sequence
+        # backtracking + termination
+        best_final_state = np.argmax(V[-1])
+
+        best_path = [best_final_state]
+
+        for t in range(sent_length - 1, 0, -1): # backtrack
+            best_path.append(B[t, best_path[-1]])
+        
+        predicted_tags = [self.states[idx] for idx in reversed(best_path)]
+        return predicted_tags
 
     def handle_oov(self, word, prev_tag):
         """ Assign a POS tag to an OOV word based on regex rules"""
