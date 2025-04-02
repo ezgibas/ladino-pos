@@ -78,9 +78,17 @@ class HMMTagger:
         for iteration in range(iterations):
             # print("iteration: " + str(iteration))
             # initialize expectations
-            expected_transitions = np.zeros((self.num_tags, self.num_tags)) 
-            expected_emissions = np.zeros((self.num_tags, self.vocab_size))
-            expected_initials = np.zeros(self.num_tags)
+            acc_transitions = np.full((self.num_tags, self.num_tags), -np.inf) 
+            acc_emissions = np.full((self.num_tags, self.vocab_size), -np.inf)
+            acc_initials = np.full(self.num_tags, -np.inf)
+
+            # track denominators for normalization
+            acc_transition_denom = np.full(self.num_tags, -np.inf)
+            acc_emission_denom = np.full(self.num_tags, -np.inf)
+
+            # track log probability
+            total_log_prob = 0
+            total_seq_length = 0
             for sequence in sequences:
                 if len(sequence) <= 1:
                     continue # TODO SCUFFED
@@ -89,15 +97,9 @@ class HMMTagger:
                 alpha = self.forward(sequence)
                 beta = self.backward(sequence)
 
-                print("Max log-alpha:", np.max(alpha))
-                print("Min log-alpha:", np.min(alpha))
-                print("Max log-beta:", np.max(beta))
-                print("Min log-beta:", np.min(beta))
-
-                log_prob_sequence =  np.logaddexp.reduce(alpha[-1][:])
-                avg_log_prob = log_prob_sequence / len(sequence)
-
-                print("Log probability: " + str(avg_log_prob))
+                log_prob_sequence = np.logaddexp.reduce(alpha[-1][:])
+                total_log_prob += log_prob_sequence
+                total_seq_length += len(sequence)
 
                 xis = [] # xi (hidden transitions)
                 gammas = [] # gamma (posterior probabilities for states)
@@ -106,108 +108,74 @@ class HMMTagger:
                     xis.append(self.xi(t, sequence, alpha, beta))
                 for t in range(len(sequence)):
                     gammas.append(self.gamma(t, sequence, alpha, beta, xis))
-
-
                 gammas = np.array(gammas)
-                # print("Sum of gammas per state:", np.sum(gammas, axis=0))
 
                 # CALCULATE EXPECTATIONS FOR MATRICES
-                # initial probabilities
-                initials_num = np.zeros(self.num_tags)
-                for i in range(self.num_tags):
-                    initials_num[i] = gammas[0][i]
+                # INITIALS
+                acc_initials = np.logaddexp(acc_initials, gammas[0])
+                # ACCUMULATE TRANSITION COUNTS
+                for t in range(len(sequence) - 1):
+                    # Add this sequence's transitions to accumulator
+                    acc_transitions = np.logaddexp(acc_transitions, xis[t])
+                    
+                    # Also accumulate denominators (total transitions from each state)
+                    for i in range(self.num_tags):
+                        xi_sum_i = np.logaddexp.reduce(xis[t][i, :])
+                        acc_transition_denom[i] = np.logaddexp(acc_transition_denom[i], xi_sum_i)
                 
-                # initials_denom = np.logaddexp.reduce(gammas[0][:])
-
-                # apply Laplace smoothing early - otherwise values underflow
-                expected_initials = np.logaddexp(initials_num, smoothing)  
-                initials_denom = np.logaddexp(initials_denom, smoothing) 
+                # ACCUMULATE EMISSION COUNTS
+                for t in range(len(sequence)):
+                    word = sequence[t]
+                    if word in self.vocab:  # Skip OOV words
+                        word_idx = self.vocab.index(word)
+                        for i in range(self.num_tags):
+                            # Add to emission count for this (state, word) pair
+                            acc_emissions[i, word_idx] = np.logaddexp(
+                                acc_emissions[i, word_idx], gammas[t, i])
+                    
+                    # Add to denominator (total emissions from each state)
+                    for i in range(self.num_tags):
+                        acc_emission_denom[i] = np.logaddexp(acc_emission_denom[i], gammas[t, i])
+    
+            # AFTER PROCESSING ALL SEQUENCES, NORMALIZE WITH SMOOTHING
+        
+            # Normalize initial probabilities
+            expected_initials = acc_initials
+            
+            # Normalize transition probabilities
+            expected_transitions = np.full((self.num_tags, self.num_tags), -np.inf)
+            for i in range(self.num_tags):
+                # Apply smoothing
+                for j in range(self.num_tags):
+                    # Add smoothing to numerator
+                    smoothed_trans_num = np.logaddexp(acc_transitions[i, j], np.log(smoothing))
+                    # Denominator with smoothing
+                    smoothed_trans_denom = np.logaddexp(acc_transition_denom[i], 
+                                                    np.log(smoothing * self.num_tags))
+                    # Normalize
+                    expected_transitions[i, j] = smoothed_trans_num - smoothed_trans_denom
+            
+            # Normalize emission probabilities
+            expected_emissions = np.full((self.num_tags, self.vocab_size), -np.inf)
+            for i in range(self.num_tags):
+                # Apply smoothing to denominator
+                smoothed_emit_denom = np.logaddexp(acc_emission_denom[i], 
+                                                np.log(smoothing * self.vocab_size))
                 
-                # normalize
-                expected_initials = initials_num - initials_denom
-
-                # hidden - hidden transitions
-                transitions_num = np.full((self.num_tags, self.num_tags), -np.inf)
-                transitions_denom = np.full(self.num_tags, -np.inf)
-
-                # sum over all time steps
-                for t in range(len(xis)):
-                    transitions_num = np.logaddexp(transitions_num, xis[t])
-
-                # sum over all transitions from each state i
-                for i in range(self.num_tags):
-                    # to each state j
-                    for j in range(self.num_tags):
-                        transitions_denom[i] = np.logaddexp(transitions_num[i,])
-
-                # apply Laplace smoothing early - otherwise values underflow
-                transitions_num = np.logaddexp(transitions_num, smoothing)  
-                transitions_denom = np.logaddexp(transitions_denom, smoothing) 
-
-                # normalize
-                expected_transitions = transitions_num - transitions_denom
-                # for i in range(self.num_tags):
-                #     expected_transitions[i] -= np.logaddexp.reduce(expected_transitions[i])
-
-                # emissions
-                for i in range(self.num_tags):
-                    emissions_denom = np.logaddexp.reduce(gammas[:, i])  
-                    emissions_denom = np.logaddexp(emissions_denom, smoothing) # smoothing
-                    emissions_denom = max(emissions_denom, np.log(1e-3)) # prevent instability
-
-                    # Loop over unique words in the sequence
-                    unique_words = set(sequence)
-                    for k in unique_words:
-                        mask = sequence == k  # mask for words matching k
-                        k_idx = self.vocab.index(k)
-                        if np.any(mask):  # if word in sequence
-                            emissions_num = np.logaddexp.reduce(gammas[:, i][mask])  
-                        else:
-                            emissions_num = np.log(1e-6)  
-
-                        # smoothing
-                        emissions_num = np.logaddexp(emissions_num, smoothing)
-                        # normalize
-                        expected_emissions[i, k_idx] = emissions_num - emissions_denom
-
-                # UPDATE 
-
-                expected_emissions = np.exp(expected_emissions)
-                expected_initials = np.exp(expected_initials)
-                expected_transitions = np.exp(expected_transitions)
-
-                # normalize the expected values first
-                emission_sums = expected_emissions.sum(axis = 1)
-                trans_sums = expected_transitions.sum(axis = 1)
-
-
-                expected_emissions = expected_emissions / emission_sums[:, np.newaxis]
-                expected_transitions = expected_transitions / trans_sums[:, np.newaxis]
-                expected_initials = expected_initials / sum(expected_initials)
-
-                # print(sum(expected_emissions[0]))
-                # print(sum(expected_initials))
-                # print(sum(expected_transitions[0]))
-                # exponentiate 
-                self.transition_probs = np.exp(self.transition_probs)
-                self.initial_probs = np.exp(self.initial_probs)
-                self.emission_probs = np.exp(self.emission_probs)
-                # learn
-                self.transition_probs = np.log((1 - learning_rate) * self.transition_probs + learning_rate * expected_transitions)
-                self.initial_probs = np.log((1 - learning_rate) * self.initial_probs + learning_rate * expected_initials)
-                self.emission_probs = np.log((1 - learning_rate) * self.emission_probs + learning_rate * expected_emissions)
-
-                # self.transition_probs = expected_transitions
-                # self.initial_probs = expected_initials
-                # self.emission_probs = expected_emissions
-
-                # normalize
-                # self.transition_probs = np.log(self.transition_probs / self.transition_probs.sum(axis = 1, keepdims=True))
-                # self.initial_probs = np.log(self.initial_probs / self.initial_probs.sum())
-                # self.emission_probs = np.log(self.emission_probs / self.emission_probs.sum(axis = 1, keepdims=True))
-
-            # decay learning rate
-            learning_rate = learning_rate * decay_rate
+                for v in range(self.vocab_size):
+                    # Apply smoothing to numerator
+                    smoothed_emit_num = np.logaddexp(acc_emissions[i, v], np.log(smoothing))
+                    # Normalize
+                    expected_emissions[i, v] = smoothed_emit_num - smoothed_emit_denom
+            
+            # UPDATE MODEL PARAMETERS
+            self.initial_probs = expected_initials
+            self.transition_probs = expected_transitions
+            self.emission_probs = expected_emissions
+            
+            # Log progress
+            avg_log_prob = total_log_prob / total_seq_length
+            print(f"Iteration {iteration+1}: Average log probability = {avg_log_prob:.4f}")
 
     def forward(self, sequence):
         """Compute forward probabilities (alpha)"""
