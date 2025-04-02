@@ -4,18 +4,6 @@ import pickle
 from load_preprocessed_data import strip_punctuation
 from scipy.special import logsumexp
 
-# rules = [
-#     (r'.*(ando|endo)$', 'VERB'), # verbs in gerund
-#     (r'.*(ido|ado|ida|ada)$', 'VERB'), # verbs in continuous
-#     (r'.*(er|ir|ar)$', 'VERB'), # verbs in infinitive
-#     (r'.*(erse|irse|arse)$', 'VERB'), # verbs in infinitive reflexive
-#     (r'.*mente$', 'ADV'), # -mente suffix is for adverbs 
-#     (r'^-?[0-9]+(.[0-9]+)?\.*$', 'NUM'), # numbers
-#     (r'(el|la|un|uno|una)$', 'DET'), # determiners
-#     (r'(eya|yo)$', 'PRON'), # pronouns
-#     (r'[!\"#\$%&\'\(\)\*\+,\-.\/:;<=>\?@\[\\\]\^_`{\|}~]', 'PUNCT'), # punctuation   
-# ]
-
 class HMMTagger:
     def __init__(self, tags, vocab):
         self.states = tags
@@ -88,21 +76,28 @@ class HMMTagger:
         # compute expectations over all training sequences
         # one loop = one forward-backward pass
         for iteration in range(iterations):
-            print("iteration: " + str(iteration))
+            # print("iteration: " + str(iteration))
             # initialize expectations
             expected_transitions = np.zeros((self.num_tags, self.num_tags)) 
             expected_emissions = np.zeros((self.num_tags, self.vocab_size))
             expected_initials = np.zeros(self.num_tags)
             for sequence in sequences:
+                if len(sequence) <= 1:
+                    continue # TODO SCUFFED
                 sequence = np.array([strip_punctuation(word.lower()) for word in sequence])
                 # forward and backward probabilities
                 alpha = self.forward(sequence)
                 beta = self.backward(sequence)
 
+                print("Max log-alpha:", np.max(alpha))
+                print("Min log-alpha:", np.min(alpha))
+                print("Max log-beta:", np.max(beta))
+                print("Min log-beta:", np.min(beta))
+
                 log_prob_sequence =  np.logaddexp.reduce(alpha[-1][:])
                 avg_log_prob = log_prob_sequence / len(sequence)
 
-                # print("Log probability: " + str(avg_log_prob))
+                print("Log probability: " + str(avg_log_prob))
 
                 xis = [] # xi (hidden transitions)
                 gammas = [] # gamma (posterior probabilities for states)
@@ -112,16 +107,38 @@ class HMMTagger:
                 for t in range(len(sequence)):
                     gammas.append(self.gamma(t, sequence, alpha, beta, xis))
 
+
                 gammas = np.array(gammas)
+                # print("Sum of gammas per state:", np.sum(gammas, axis=0))
 
                 # CALCULATE EXPECTATIONS FOR MATRICES
                 # initial probabilities
+                initials_num = np.zeros(self.num_tags)
                 for i in range(self.num_tags):
-                    expected_initials[i] = gammas[0][i]
+                    initials_num[i] = gammas[0][i]
+                
+                # initials_denom = np.logaddexp.reduce(gammas[0][:])
+
+                # apply Laplace smoothing early - otherwise values underflow
+                expected_initials = np.logaddexp(initials_num, smoothing)  
+                initials_denom = np.logaddexp(initials_denom, smoothing) 
+                
+                # normalize
+                expected_initials = initials_num - initials_denom
 
                 # hidden - hidden transitions
-                transitions_num = np.logaddexp.reduce(xis, axis=0)
-                transitions_denom = np.logaddexp.reduce(gammas[:-1], axis=0)
+                transitions_num = np.full((self.num_tags, self.num_tags), -np.inf)
+                transitions_denom = np.full(self.num_tags, -np.inf)
+
+                # sum over all time steps
+                for t in range(len(xis)):
+                    transitions_num = np.logaddexp(transitions_num, xis[t])
+
+                # sum over all transitions from each state i
+                for i in range(self.num_tags):
+                    # to each state j
+                    for j in range(self.num_tags):
+                        transitions_denom[i] = np.logaddexp(transitions_num[i,])
 
                 # apply Laplace smoothing early - otherwise values underflow
                 transitions_num = np.logaddexp(transitions_num, smoothing)  
@@ -129,11 +146,14 @@ class HMMTagger:
 
                 # normalize
                 expected_transitions = transitions_num - transitions_denom
+                # for i in range(self.num_tags):
+                #     expected_transitions[i] -= np.logaddexp.reduce(expected_transitions[i])
 
                 # emissions
                 for i in range(self.num_tags):
                     emissions_denom = np.logaddexp.reduce(gammas[:, i])  
                     emissions_denom = np.logaddexp(emissions_denom, smoothing) # smoothing
+                    emissions_denom = max(emissions_denom, np.log(1e-3)) # prevent instability
 
                     # Loop over unique words in the sequence
                     unique_words = set(sequence)
@@ -150,25 +170,41 @@ class HMMTagger:
                         # normalize
                         expected_emissions[i, k_idx] = emissions_num - emissions_denom
 
-            # UPDATE 
-            # exponentiate 
-            self.transition_probs = np.exp(self.transition_probs)
-            self.initial_probs = np.exp(self.initial_probs)
-            self.emission_probs = np.exp(self.emission_probs)
+                # UPDATE 
 
-            expected_emissions = np.exp(expected_emissions)
-            expected_initials = np.exp(expected_initials)
-            expected_transitions = np.exp(expected_transitions)
+                expected_emissions = np.exp(expected_emissions)
+                expected_initials = np.exp(expected_initials)
+                expected_transitions = np.exp(expected_transitions)
 
-            # learn
-            self.transition_probs = (1 - learning_rate) * self.transition_probs + learning_rate * expected_transitions
-            self.initial_probs = (1 - learning_rate) * self.initial_probs + learning_rate * expected_initials
-            self.emission_probs = (1 - learning_rate) * self.emission_probs + learning_rate * expected_emissions
+                # normalize the expected values first
+                emission_sums = expected_emissions.sum(axis = 1)
+                trans_sums = expected_transitions.sum(axis = 1)
 
-            # normalize
-            self.transition_probs = np.log(self.transition_probs / self.transition_probs.sum(axis = 1, keepdims=True))
-            self.initial_probs = np.log(self.initial_probs / self.initial_probs.sum())
-            self.emission_probs = np.log(self.emission_probs / self.emission_probs.sum(axis = 1, keepdims=True))
+
+                expected_emissions = expected_emissions / emission_sums[:, np.newaxis]
+                expected_transitions = expected_transitions / trans_sums[:, np.newaxis]
+                expected_initials = expected_initials / sum(expected_initials)
+
+                # print(sum(expected_emissions[0]))
+                # print(sum(expected_initials))
+                # print(sum(expected_transitions[0]))
+                # exponentiate 
+                self.transition_probs = np.exp(self.transition_probs)
+                self.initial_probs = np.exp(self.initial_probs)
+                self.emission_probs = np.exp(self.emission_probs)
+                # learn
+                self.transition_probs = np.log((1 - learning_rate) * self.transition_probs + learning_rate * expected_transitions)
+                self.initial_probs = np.log((1 - learning_rate) * self.initial_probs + learning_rate * expected_initials)
+                self.emission_probs = np.log((1 - learning_rate) * self.emission_probs + learning_rate * expected_emissions)
+
+                # self.transition_probs = expected_transitions
+                # self.initial_probs = expected_initials
+                # self.emission_probs = expected_emissions
+
+                # normalize
+                # self.transition_probs = np.log(self.transition_probs / self.transition_probs.sum(axis = 1, keepdims=True))
+                # self.initial_probs = np.log(self.initial_probs / self.initial_probs.sum())
+                # self.emission_probs = np.log(self.emission_probs / self.emission_probs.sum(axis = 1, keepdims=True))
 
             # decay learning rate
             learning_rate = learning_rate * decay_rate
@@ -237,7 +273,7 @@ class HMMTagger:
         word = sequence[t+1]
         word_idx = self.vocab.index(word) if word in self.vocab else -1 
 
-        xi = np.zeros((self.num_tags, self.num_tags))
+        xi = np.full((self.num_tags, self.num_tags), -np.inf)
 
         sum_sequence = [] # store logsumexp results
 
@@ -256,19 +292,22 @@ class HMMTagger:
         # normalization factor
         denom = np.logaddexp.reduce(sum_sequence)
         # normalize
-        xi -= denom
+        for i in range(self.num_tags):
+            for j in range(self.num_tags):
+                xi[i, j] -= denom
 
         return xi
     
     def gamma(self, t, sequence, alpha, beta, xi_vals):
         """Compute gamma values, posterior probability P(X_i = tag | words so far)"""
-        if t >= len(sequence):
-            gamma = np.logaddexp.reduce(xi_vals[t], axis=1) 
-        else:
-            gamma = alpha[t] + beta[t]
+        gamma = alpha[t] + beta[t]
         
-        gamma_denom = np.logaddexp.reduce(alpha[t] + beta[t]) 
+        gamma_denom = np.logaddexp.reduce(gamma)
         gamma -= gamma_denom
+
+        # for i in range(self.num_tags):
+        #     gamma[i] = np.logaddexp.reduce(xi_vals[t][i, :])
+        # return gamma
 
         return gamma
 
@@ -316,18 +355,3 @@ class HMMTagger:
         
         predicted_tags = [self.states[idx] for idx in reversed(best_path)]
         return predicted_tags
-
-    def handle_oov(self, word, prev_tag):
-        """ Assign a POS tag to an OOV word based on regex rules"""
-        # for pattern, tag in rules:
-            # if re.fullmatch(pattern, word):  # check if word matches regex pattern
-            #     return tag
-            # instead of default fallback rule, maximize transition probability
-        if prev_tag is not None:
-            prev_tag_idx = self.states.index(prev_tag)
-            tag_idx =  np.argmax(self.transition_probs[prev_tag_idx])
-            return self.states[tag_idx]
-        # select tag that is most likely to start a sentence
-        else:
-            tag_idx = np.argmax(self.initial_probs)
-            return self.states[tag_idx]
