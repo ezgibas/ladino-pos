@@ -1,4 +1,5 @@
 from collections import Counter, defaultdict
+import re
 
 class Token:
     def __init__(self, word, pos):
@@ -21,7 +22,7 @@ class Token:
     def __str__(self):
         return self.word + " (" + self.pos + ")"
     
-def load_tagged_sentences(file_path, split=0.8):
+def load_brown_data(file_path, split=0.8):
     sentences = []  
     current_sentence = [] 
 
@@ -61,3 +62,15 @@ def load_tags(file_path):
             line = line.strip()
             tags.append(line)
     return tags
+
+def load_predictions(file_path):
+    predictions = []
+    with open(file_path, "r", encoding="utf-8") as file:
+        for line in file:
+            prediction = []
+            matches = re.findall(r"(\S+)\s*\((\S+)\)", line.strip())
+            for word, tag in matches:
+                word = word.lower()
+                prediction.append(tag)
+        predictions.append(prediction)
+    return prediction
