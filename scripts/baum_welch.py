@@ -19,9 +19,9 @@ class BaumWelch:
         emission_probs /= emission_probs.sum(axis=1, keepdims=True) 
         initial_probs /= initial_probs.sum() 
 
-        self.transition_probs = np.log(transition_probs)
-        self.emission_probs = np.log(emission_probs)
-        self.initial_probs = np.log(initial_probs)
+        self.transition_probs = np.log2(transition_probs)
+        self.emission_probs = np.log2(emission_probs)
+        self.initial_probs = np.log2(initial_probs)
     
     def save_hmm(hmm, filename="../results/hmm_tagger-BW.pkl"):
         """Save HMM to a file"""
@@ -39,26 +39,30 @@ class BaumWelch:
         log: boolean - if the probabilities fed in are in log space or not
         """
         if not log:
-            self.transition_probs = np.log(transition)
-            self.emission_probs = np.log(emission)
-            self.initial_probs = np.log(initial)
+            self.transition_probs = np.log2(transition)
+            self.emission_probs = np.log2(emission)
+            self.initial_probs = np.log2(initial)
         else: 
             self.transition_probs = transition
             self.emission_probs = emission
             self.initial_probs = initial
 
     def logsumexp2(self, arr):
-        max_ = max(arr)
+        arr = np.asarray(arr)  # ensure  it's a numpy array
+        if np.all(np.isinf(arr)):
+            return -np.inf  # handle case where all values are -inf
+        max_ = np.max(arr[~np.isinf(arr)]) if np.any(np.isinf(arr)) else np.max(arr)
         return np.log2(np.sum(2 ** (arr - max_))) + max_
 
 
-    def train_em(self, sequences, max_iterations=100):
+    def train_em(self, sequences, max_iterations=100, learning_rate=0.8, decay_rate=0.9):
         """Train the HMM using the Expectation-Maximization algorithm."""
         # track convergence by looking at log probability
         converged = False
         prev_log_likelihood = None
         iteration = 0
-        epsilon = 0.001
+        epsilon = 0.01
+        logprobs = []
 
         # compute expectations over all training sequences
         # one loop = one forward-backward pass
@@ -107,36 +111,66 @@ class BaumWelch:
                 # print(f"emission: {acc_emissions_num[i]} - {acc_emission_denom[i]}")
                 logprob_trans_i = acc_transitions_num[i] - acc_transition_denom[i]
                 logprob_ems_i = acc_emissions_num[i] - acc_emission_denom[i]
+
                 # replace any -inf with a value for stability
-                logprob_ems_i[np.isinf(logprob_ems_i) & (logprob_ems_i < 0)] = np.log(1e-10)
-                logprob_trans_i[np.isinf(logprob_trans_i) & (logprob_trans_i < 0)] = np.log(1e-10)
+                logprob_ems_i[np.isinf(logprob_ems_i) & (logprob_ems_i < 0)] = np.log2(1e-10)
+                logprob_trans_i[np.isinf(logprob_trans_i) & (logprob_trans_i < 0)] = np.log2(1e-10)
 
                 logprob_trans_i -= self.logsumexp2(logprob_trans_i)
                 logprob_ems_i -= self.logsumexp2(logprob_ems_i)
-
+            
 
                 # transition probabilities
                 for j in range(self.num_tags):
-                    self.transition_probs[i, j] = logprob_trans_i[j]
+                    prob_old = 2 ** self.transition_probs[i, j]
+                    prob_new = 2 ** logprob_trans_i[j]
+                    interpolated_prob = (1 - learning_rate) * prob_old + learning_rate * prob_new
+                    self.transition_probs[i, j] = np.log2(interpolated_prob)
                 # emission probabilities
                 for k in range(self.vocab_size):
-                    self.emission_probs[i, k] = logprob_ems_i[k]
+                    # self.emission_probs[i, k] = logprob_ems_i[k]
+                    prob_old = 2 ** (self.emission_probs[i, k])
+                    prob_new = 2 ** logprob_ems_i[k]
+                    interpolated_prob =  (1 - learning_rate) * prob_old + learning_rate * prob_new
+                    self.emission_probs[i, k] = np.log2(interpolated_prob)
             # initial probabilities
             logprob_initial = acc_initial_num - acc_initial_denom
             # replace -inf for numerical stability
-            logprob_initial[np.isinf(logprob_initial) & (logprob_initial < 0)] = np.log(1e-10)
+            logprob_initial[np.isinf(logprob_initial) & (logprob_initial < 0)] = np.log2(1e-10)
             # normalize
             logprob_initial -= self.logsumexp2(logprob_initial)
 
+            # update initial probabilities
+            for i in range(self.num_tags):
+                prob_old = 2 ** (self.initial_probs[i])
+                prob_new = 2 ** logprob_initial[i]
+                interpolated_prob =  (1 - learning_rate) * prob_old + learning_rate * prob_new
+                self.initial_probs[i] = np.log2(interpolated_prob)
+
             
             # test for convergence
-            if iteration > 0 and (abs(log_likelihood - prev_log_likelihood) < epsilon or log_likelihood < prev_log_likelihood):
+            if iteration > 0 and abs(log_likelihood - prev_log_likelihood) < epsilon:
                 converged = True
 
-            print("iteration", iteration, "logprob", log_likelihood)
+            print("iteration", iteration, "logprob", log_likelihood/len(sequences))
+            # Sanity check that matrix rows sum up to 1
+            # # For transition probabilities
+            # trans_row_sums = np.array([2 ** self.logsumexp2(self.transition_probs[i]) for i in range(self.num_tags)])
+
+            # # For emission probabilities
+            # emissions_row_sums = np.array([2 ** self.logsumexp2(self.emission_probs[i]) for i in range(self.num_tags)])
+
+            # # For initial probabilities
+            # initials_sum = 2 ** self.logsumexp2(self.initial_probs)
+            # print(trans_row_sums)
+            # print(emissions_row_sums)
+            # print(initials_sum)
             iteration += 1
             prev_log_likelihood = log_likelihood
-        return self
+            logprobs.append(log_likelihood)
+            learning_rate = learning_rate*decay_rate
+
+        return (self, logprobs)
 
     def baum_welch(self, sequence):  
         """One forward-backward pass"""    
@@ -216,7 +250,7 @@ class BaumWelch:
 
                 alpha[t, j] = alpha_sum + output_prob
         # replace any -inf for numerical stability
-        alpha[np.isinf(alpha) & (alpha < 0)] = np.log(1e-10)
+        alpha[np.isinf(alpha) & (alpha < 0)] = np.log2(1e-10)
         return alpha
     
     def backward(self, sequence):
@@ -246,5 +280,5 @@ class BaumWelch:
                     
                 beta[t, j] = self.logsumexp2(beta_sum)
 
-        beta[np.isinf(beta) & (beta < 0)] = np.log(1e-10)
+        beta[np.isinf(beta) & (beta < 0)] = np.log2(1e-10)
         return beta
