@@ -61,7 +61,7 @@ class BaumWelch:
         converged = False
         prev_log_likelihood = None
         iteration = 0
-        epsilon = 0.01
+        epsilon = 0.001*len(sequences)
         logprobs = []
 
         # compute expectations over all training sequences
